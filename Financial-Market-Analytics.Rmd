@@ -1,0 +1,986 @@
+---
+title: "FINANCE_project"
+author: "Francesco Beretta"
+date: "2025-06-13"
+output:
+  word_document: default
+  pdf_document: default
+  html_document: default
+---
+
+\section{Data Pre-processing}
+
+This report presents an analysis of various momentum-based investment strategies, implemented and evaluated using R. Momentum strategies, which aim to capitalize on the continuation of existing market trends, are tested over a historical dataset based on the STOXX Europe 600 index, which includes monthly returns of its 600 constituent stocks. The implementation involves calculating momentum signals, constructing portfolios based on those signals, and tracking their performance over time. Key performance metrics such as returns, volatility, Sharpe ratio, and maximum drawdown are computed and analyzed to assess the effectiveness of each strategy. The objective is to identify which momentum-based approaches offer the most favorable risk-return profiles under different market conditions.
+
+```{r}
+library(readxl)
+data<-read_excel("C:/Users/andre/Downloads/Stoxx 600 Originale.xlsm",
+                 sheet = "Price")
+colnames(data) <- data[1, ]
+data <- data[-1, ]
+data$Dates <- as.numeric(data$Dates)
+data$Dates <- as.Date(data$Dates, origin = "1899-12-30")
+head(data)
+```
+
+The dataset is pre-processed by converting prices to numeric format and dates to proper date objects. Additionally, the data is reshaped into long format to facilitate the implementation of the momentum strategies.
+
+```{r}
+for (col in 2:ncol(data)) {
+  data[[col]] <- as.numeric(data[[col]])
+}
+library(reshape2)
+library(tidyverse)
+data_long <- melt(data, id.vars = "Dates", 
+                  variable.name = "Ticker", 
+                  value.name = "Price")
+data_long <- as_tibble(data_long)
+head(data_long)
+```
+
+To ensure data accuracy, stocks that likely exit the index at a given point in time are initially retained in the dataset with constant prices. However, these unchanging price entries can distort the momentum signals and performance analysis. Therefore, they are individually identified and removed to avoid bias in the results.
+
+```{r}
+library(dplyr)
+data_long <- data_long %>%
+  arrange(Ticker, Dates) %>%
+  group_by(Ticker) %>%
+  mutate(
+    Price_lag = lag(Price),
+    is_const = Price == Price_lag
+  ) %>%
+  filter(is_const != TRUE | is.na(is_const))%>%
+  select(-is_const) %>%
+  select(-Price_lag)
+data_long
+```
+
+In this step, we calculate the one-month returns for each stock by grouping the data by ticker, sorting it by date, and applying the return formula: (current_price / previous_price) - 1. We choose to use the simple return formula  instead of logarithmic returns. Although log returns have some theoretical advantages, such as time additivity, simple returns are more intuitive and easier to interpret in the context of momentum strategy implementation and portfolio analysis. 
+We then remove the original price column and omit all rows containing NA values. This effectively excludes the first observation for each stock, as returns cannot be computed without a prior price. This omission is justified, as the lack of return data for the first month makes it impossible to calculate further statistics, such as skewness.
+
+```{r}
+monthly_data <- data_long %>%
+  group_by(Ticker) %>%
+  arrange(Dates) %>%
+  mutate(monthly_return = (Price / lag(Price, 1)) - 1) %>%
+  ungroup() %>%
+  select(-Price) %>%
+  na.omit()
+monthly_data
+```
+
+The resulting dataset contains, for each stock in the index and for each month, both the price and the corresponding monthly return, providing a solid foundation for further analysis.
+
+```{r}
+df_integrated <- data_long %>%
+  inner_join(monthly_data, by = c("Dates", "Ticker"))
+df_integrated
+```
+
+To calculate skewness, we use daily data instead of monthly data. Following the same approach applied to the monthly dataset, we process the daily prices to obtain a final dataset containing both daily returns and daily prices. This allows for a more precise estimation of the return distribution’s asymmetry, which is essential for the skewness-based stock selection.
+
+```{r}
+data_daily<-read_excel("C:/Users/andre/Downloads/Stoxx 600 Originale.xlsm",
+                 sheet = "Price daily")
+colnames(data_daily) <- data_daily[1, ]
+data_daily <- data_daily[-1, ]
+data_daily$Dates <- as.numeric(data_daily$Dates)
+data_daily$Dates <- as.Date(data_daily$Dates, origin = "1899-12-30")
+
+for (col in 2:ncol(data_daily)) {
+  data_daily[[col]] <- as.numeric(data_daily[[col]])
+}
+data_daily_long <- melt(data_daily, id.vars = "Dates", 
+                  variable.name = "Ticker", 
+                  value.name = "Price")
+data_daily_long <- as_tibble(data_daily_long)
+
+data_daily_long <- data_daily_long %>%
+  arrange(Ticker, Dates) %>%
+  group_by(Ticker) %>%
+  mutate(
+    Price_lag = lag(Price),
+    is_const = Price == Price_lag
+  ) %>%
+  filter(is_const != TRUE | is.na(is_const)) %>%
+  select(-is_const) %>%
+  select(-Price_lag)
+
+daily_data <- data_daily_long %>%
+  group_by(Ticker) %>%
+  arrange(Dates) %>%
+  mutate(daily_return = (Price / lag(Price, 1)) - 1) %>%
+  ungroup() %>%
+  select(-Price) %>%
+  na.omit() 
+
+df_daily_integrated <- data_daily_long %>%
+  inner_join(daily_data, by = c("Dates", "Ticker"))
+df_daily_integrated
+```
+
+\Section{Performance Analysis of Individual Strategies}
+In this analysis, we implement and compare three distinct investment strategies based on momentum signals, along with a benchmark performance reference based on the STOXX Europe 600 Index. Each strategy leverages different financial characteristics and selection criteria to construct monthly rebalanced portfolios. Below is an overview of the methodologies employed. \begin{itemize}
+\item Skewness-Filtered Momentum Strategy: The first strategy integrates a two-step selection process that combines return asymmetry and price momentum. In the initial phase, stocks are filtered based on their monthly skewness measured in the previous month. Specifically, only those exhibiting the most negative skewness are retained, under the assumption that negatively skewed assets may reflect higher upside potential and investor risk appetite. In the second step, we apply a 12-month momentum filter—calculated as cumulative returns from the 13th to the 2nd month prior to portfolio formation, thus excluding the most recent month already used for skewness calculation. Among the previously selected stocks, only those with the highest past returns are included in the final portfolio.
+
+\item Simple Momentum Strategy: The second strategy follows a more traditional momentum approach. Stocks are selected solely on the basis of their 12-month cumulative return, again excluding the most recent month to avoid short-term noise. The top-performing stocks based on this historical momentum are included in the portfolio, reflecting the well-documented persistence of positive returns among winners.
+
+\item Residual Momentum Strategy: The third strategy employs residual momentum, which involves selecting stocks based on the residuals from a factor model regression. This method aims to capture the portion of asset returns not explained by common risk factors (e.g., market, size, value), isolating firm-specific information. Stocks with the highest positive residuals are deemed to have stronger idiosyncratic trends and are therefore prioritized in portfolio construction. \end{itemize}
+Lastly, as a benchmark for comparative purposes, we include the monthly returns of the STOXX Europe 600 Index, representing a broad and diversified market reference for European equities. This benchmark enables an assessment of whether the proposed strategies offer added value over passive market exposure.
+
+The performance of the constructed portfolios—alongside associated metrics such as cumulative returns, volatility, and Sharpe ratios—has been assessed over the six-year period from 2010 to 2015. This specific time frame was selected to ensure a robust evaluation across different market conditions, capturing both recovery phases following the 2008-2009 financial crisis and the subsequent years of moderate economic growth and evolving monetary policies in Europe. By avoiding the highly turbulent years of the financial crash and the more recent period affected by extraordinary monetary interventions (e.g. pandemic-related volatility), the 2010-2015 window provides a balanced and representative horizon to test the stability and relative performance of each strategy under standard market dynamics. This period also ensures data availability and consistency in asset coverage across all implemented strategies and the benchmark, facilitating a fair and methodologically sound comparison.
+
+\subsection{Skewness + Momentum}
+The first strategy employed in this analysis is a sophisticated two-step selection methodology that integrates measures of return asymmetry with traditional price momentum. This approach begins by filtering stocks based on their monthly skewness from the immediately preceding month, prioritizing those with the most negative skewness values. The rationale behind this choice lies in the financial theory that negatively skewed return distributions can signal asymmetric risk profiles, potentially indicating latent upside opportunities that are not fully priced by the market. Following this skewness-based screening, the strategy refines the selection by applying a 12-month momentum filter, calculated over a formation window excluding the most recent month (specifically, from the 13th to the 2nd month prior). This step ensures that the momentum signal is not contaminated by short-term reversals and focuses on persistent trends in stock returns. Only stocks exhibiting the highest cumulative returns within this adjusted momentum window are ultimately retained, aiming to construct a portfolio that leverages both return distribution characteristics and established momentum effects to achieve superior performance.
+
+The use of prior-month negative skewness as a first-step filter in our stock selection process is supported by empirical evidence showing its predictive power for future returns. Stocks with more negatively skewed returns are often perceived as riskier due to their exposure to downside tails, yet they may offer higher upside potential due to investor underreaction and behavioral biases.
+In line with the findings from Alpha Architect's study “Momentum Investing: Skewness-enhanced Momentum Yields Double Alpha”, incorporating skewness into momentum strategies enhances performance by refining the pool of candidate stocks. Their results show that momentum portfolios built on negatively skewed stocks achieve significantly higher alpha compared to traditional momentum alone.
+By filtering on the most negatively skewed stocks from the previous month, our strategy aims to exploit this return asymmetry while improving the overall effectiveness of the momentum signal applied in the second step.
+
+Our choice to adopt a 12-month momentum formation period is strongly supported by the influential research of Jegadeesh and Titman (1993), as presented in their article "Returns to Buying Winners and Selling Losers: Implications for Stock Market Efficiency" published in The Journal of Finance. Their study demonstrates that momentum strategies based on cumulative returns over the prior 3 to 12 months generate significant positive abnormal returns, which remain robust after adjusting for risk and delayed market reactions. Importantly, the 12-month horizon captures persistent price momentum effects linked to investor underreaction, while excluding the most recent month helps mitigate short-term reversal noise. Inspired by these empirical findings, we specifically chose the 12-month momentum window for our portfolio construction, confident that it balances capturing meaningful trend persistence with reducing noise, thereby improving the effectiveness and reliability of our momentum-based strategies.
+
+```{r}
+df_subset <- df_daily_integrated %>%
+  filter(year(Dates) >= 2008 & year(Dates)<=2015)
+
+df_skewness <- df_subset %>%
+  mutate(year_month = format(as.Date(Dates), "%Y-%m")) %>%  
+  group_by(Ticker, year_month) %>%
+  summarise(
+    mean = mean(daily_return, na.rm = TRUE),
+    median = median(daily_return, na.rm = TRUE),
+    mad = mean(abs(daily_return - median(daily_return, na.rm = TRUE)), na.rm = TRUE),
+    skewness = (mean - median) / mad,
+    .groups = "drop"
+  )
+library(zoo)
+top_60_skew <- df_skewness %>%
+  group_by(year_month) %>%
+  arrange(skewness) %>%
+  slice_head(n = 60) %>%
+  mutate(year_month = as.yearmon(year_month, format = "%Y-%m"))%>%
+  ungroup()
+ticker <- split(top_60_skew$Ticker, top_60_skew$year_month)
+```
+
+Next, the objective is to identify, for each month, a subset of 30 stocks with the highest 12-month momentum among those that exhibited the most negatively skewed daily returns in the same month. We consider the 60 stocks as candidates for the momentum analysis.
+The 12-month momentum is calculated as the percentage change in price between the current month and 12 months prior. From the momentum values, only the data corresponding to the final month of the window (i.e., one month before the current month) is retained. Then, the stocks are ranked by their momentum values in descending order, and the top 30 are selected. These 30 stocks are stored along with the corresponding month for which the skewness was originally computed.
+Finally, the monthly results are combined into a single dataset (df_top_momentum) and a dictionary is created, mapping each month to the corresponding list of top 30 momentum stocks.
+
+```{r}
+months <- as.yearmon(seq(as.Date("2009-12-01"), as.Date("2015-12-01"), by = "month"))
+months <- format(months, "%b %Y")
+
+momentum_results <- list()
+
+for (month in months) {
+  month_ym <- as.yearmon(month, format = "%b %Y")
+  current_tickers <- ticker[[month]] 
+  starting_period <- as.Date(month_ym - 12/12)  
+  ending_period <- as.Date(month_ym - 1/12 + 1/12, frac = 0) - 1   
+  
+  momentum_data <- df_integrated %>%
+    filter(as.character(Ticker) %in% unlist(current_tickers)) %>%
+    filter(Dates >= starting_period & Dates <= ending_period) %>%
+    mutate(year_month = as.yearmon(Dates)) %>%
+    group_by(Ticker, year_month) %>%
+    summarise(monthly_price = last(Price), .groups = "drop") %>%
+    arrange(Ticker, year_month) %>%
+    group_by(Ticker) %>%
+    mutate(momentum_12m = (monthly_price / lag(monthly_price, 11)) - 1) %>%
+    ungroup() %>%
+    filter(year_month == as.yearmon(ending_period)) %>%
+    arrange(desc(momentum_12m)) %>%
+    slice_head(n = 30) %>%
+    mutate(month_skewness = month) 
+  
+  momentum_results[[month]] <- momentum_data
+}
+
+
+df_top_momentum <- bind_rows(momentum_results)
+df_top_momentum$year_month <- format(df_top_momentum$year_month + 2/12, "%b %Y")
+
+dictionary_momentum <- split(df_top_momentum$Ticker, df_top_momentum$year_month)
+```
+
+Now we calculate the mean monthly return associated with its risk, and sharpe ratio.
+For each month, three key financial metrics are computed: mean return, risk (measured as standard deviation), and the Sharpe ratio. These indicators are fundamental in assessing both the profitability and the volatility of the selected portfolio.
+The mean return reflects the average of the monthly returns across all selected assets for a given month. It is computed using the formula: \[
+\text{Mean Return} = \frac{1}{N} \sum_{i=1}^{N} r_i
+\]
+where r_i where is the average monthly return of asset i, and N is the number of assets considered for that month.
+The risk is defined as the standard deviation of asset returns, capturing the variability of returns within the portfolio: \[
+\text{Risk} = \sqrt{ \frac{1}{N - 1} \sum_{i=1}^{N} (r_i - \bar{r})^2 }
+\]
+with \(\bar{r}\) indicating the mean return of the portfolio.
+
+Finally, the Sharpe ratio is used to measure the risk-adjusted return, assuming a zero risk-free rate. It is computed as:
+\[
+\text{Sharpe Ratio} = \frac{\text{Mean Return}}{\text{Risk}}
+\]
+
+```{r}
+library(lubridate)
+mean_returns <- list()
+for (month in names(dictionary_momentum)) {
+  monthly_tickers <- dictionary_momentum[[month]]
+  
+  data_month <- df_integrated %>%
+  filter(format(as.yearmon(Dates), "%b %Y") == month) %>%
+  filter(Ticker %in% monthly_tickers)
+
+  
+  ticker_returns <- data_month %>%
+    group_by(Ticker) %>%
+    summarise(return = mean(monthly_return, na.rm = TRUE), .groups = "drop")
+  
+  mean_return <- mean(ticker_returns$return, na.rm = TRUE)
+  
+  risk <- sd(ticker_returns$return, na.rm = TRUE)
+  
+  #we assumed that monthly risk-free rate = 0
+  sharpe_ratio <- ifelse(risk > 0, mean_return / risk, NA)
+  
+  result <- tibble(
+    month = month,
+    return = mean_return,
+    risk = risk,
+    sharpe_ratio = sharpe_ratio
+  )
+  
+  mean_returns[[month]] <- result
+}
+
+df_results_skew <- bind_rows(mean_returns)
+df_results_skew <- df_results_skew %>%
+  filter(month != "gen 2016")
+df_results_skew
+```
+
+To evaluate the annual performance of the skewness-based momentum strategy, we computed a set of key financial metrics aggregated at the yearly level.
+Specifically, for each year, the \textbf{cumulative return} was calculated as:
+\[
+\text{Cumulative Return} = \prod_{t=1}^{n} (1 + r_t) - 1
+\]
+where \( r_t \) denotes the monthly return in month \( t \). This metric captures the compounded growth of the portfolio over the year.
+In addition to cumulative performance, we computed the \textbf{average monthly return} (monthly_return) as the arithmetic mean of the monthly returns, and the \textbf{monthly risk} as the standard deviation of those returns. These are defined respectively as:
+\[
+\text{Average Monthly Return} = \frac{1}{n} \sum_{t=1}^{n} r_t
+\]
+\[
+\text{Monthly Risk} = \sqrt{ \frac{1}{n-1} \sum_{t=1}^{n} (r_t - \bar{r})^2 }
+\]
+From these values, we derived the \textbf{annualized Sharpe Ratio}, a standard measure of risk-adjusted performance, calculated as:
+\[
+\text{Sharpe Ratio} = \frac{\text{Average Monthly Return} \times 12}{\text{Monthly Risk} \times \sqrt{12}}
+\]
+Additionally, the \textbf{annual risk} was computed by scaling the monthly risk by the square root of 12:
+\[
+\text{Annual Risk} = \text{Monthly Risk} \times \sqrt{12}
+\]
+These metrics provide a comprehensive view of both the total return and the risk profile associated with the strategy over time, facilitating comparisons across different years and investment strategies.
+
+```{r}
+df_results_skew <- df_results_skew %>%
+  mutate(year = substr(month, 5, 8))  
+
+df_annual_skew <- df_results_skew %>%
+  group_by(year) %>%
+  summarise(
+    cum_return = prod(1 + mean_return) - 1,
+    monthly_return = mean(mean_return, na.rm = TRUE),
+    monthly_risk = sd(mean_return, na.rm = TRUE),
+    sharpe_ratio = (monthly_return * 12) / (monthly_risk * sqrt(12)),
+    annual_risk = monthly_risk * sqrt(12),
+    .groups = "drop"
+  )
+
+df_annual_skew
+```
+The performance metrics for the skewness-based momentum strategy across the years 2010-2015 reveal considerable variability in both return and risk-adjusted performance. The strategy performed particularly well in 2010 and 2012, achieving cumulative returns of 29.6\% and 26.8\%, respectively, with Sharpe Ratios exceeding 1.5, indicating strong risk-adjusted returns. In contrast, 2011 marks a negative year, with a cumulative return of -12.9\% and a Sharpe Ratio of -0.88, reflecting poor performance relative to risk.
+
+Volatility, measured by annual risk, fluctuates across years, with the highest level observed in 2015 (18.6\%) and the lowest in 2012 (9.9\%). Notably, 2012 combines low risk with high return, yielding the highest Sharpe Ratio (2.46) in the period, highlighting a particularly efficient performance. From 2013 onwards, both returns and Sharpe Ratios gradually decline, suggesting a possible weakening in the strategy’s effectiveness or a shift in market dynamics.
+
+
+\subsection{Simple Momentum}
+
+The Simple Momentum approach adopts a classic momentum framework. Stocks are chosen purely based on their cumulative performance over the past 12 months, with the most recent month omitted to reduce short-term volatility effects. The portfolio is composed of the top performers from this ranking, leveraging the extensively observed tendency of past winners to continue outperforming.
+
+The following code builds a monthly dictionary of the top 30 stocks ranked by their 12-month momentum. For each month, it calculates the momentum, selects the top performers, and stores their tickers in a list keyed by month, creating a ready-to-use reference for subsequent analysis or portfolio construction.
+
+```{r}
+months <- as.yearmon(seq(as.Date("2009-12-01"), as.Date("2015-12-01"), by = "month"))
+months <- format(months, "%b %Y")
+momentum_results <- list()
+
+for (month in months) {
+  month_ym <- as.yearmon(month, format = "%b %Y")
+  starting_period <- as.Date(month_ym - 12/12)  
+  ending_period <- as.Date(month_ym - 1/12 + 1/12, frac = 0) - 1   
+  
+  momentum_data <- df_integrated %>%
+    filter(Dates >= starting_period & Dates <= ending_period) %>%
+    mutate(year_month = as.yearmon(Dates)) %>%
+    group_by(Ticker, year_month) %>%
+    summarise(monthly_price = last(Price), .groups = "drop") %>%
+    arrange(Ticker, year_month) %>%
+    group_by(Ticker) %>%
+    mutate(momentum_12m = (monthly_price / lag(monthly_price, 11)) - 1) %>%
+    ungroup() %>%
+    filter(year_month == as.yearmon(ending_period)) %>%
+    arrange(desc(momentum_12m)) %>%
+    slice_head(n = 30)
+  
+  momentum_results[[month]] <- momentum_data
+}
+
+df_top_momentum_simply<- bind_rows(momentum_results)
+df_top_momentum_simply$year_month <- format(df_top_momentum_simply$year_month + 2/12,
+                                            "%b %Y")
+
+dictionary_momentum_simply <- split(df_top_momentum_simply$Ticker,
+                                    df_top_momentum_simply$year_month)
+```
+
+Now we calculate the mean monthly return associated with its risk, and sharpe ratio.
+
+```{r}
+mean_returns <- list()
+
+for (month in names(dictionary_momentum_simply)) {
+  monthly_tickers <- dictionary_momentum_simply[[month]]
+  
+  monthly_data <- df_integrated %>%
+    filter(format(as.yearmon(Dates), "%b %Y") == month) %>%
+    filter(year(Dates) >= 2010 & year(Dates) <= 2015) %>%
+    filter(Ticker %in% monthly_tickers)
+  
+  ticker_returns <- monthly_data %>%
+    group_by(Ticker) %>%
+    summarise(return = mean(monthly_return, na.rm = TRUE), .groups = "drop")
+  
+  mean_return <- mean(ticker_returns$return, na.rm = TRUE)
+  
+  risk <- sd(ticker_returns$return, na.rm = TRUE)
+  
+  # we assumed risk-free rate = 0
+  sharpe_ratio <- ifelse(risk > 0, mean_return / risk, NA)
+  
+  risultato <- tibble(
+    month = month,
+    mean_return = mean_return,
+    risk = risk,
+    sharpe_ratio = sharpe_ratio
+  )
+  
+  mean_returns[[month]] <- risultato
+}
+
+df_results <- bind_rows(mean_returns)
+df_results <- df_results %>%
+  filter(month != "gen 2016")
+df_results
+```
+
+The following code computes annual performance statistics for the simple momentum strategy. After extracting the year from the monthly date column, the data is aggregated by year. For each year, the script calculates the cumulative return, average monthly return, monthly standard deviation (risk), annualized Sharpe Ratio, and annualized volatility. These metrics provide a comprehensive overview of the strategy’s performance on a yearly basis.
+
+```{r}
+df_results <- df_results %>%
+  mutate(year = substr(month, 5, 8))  
+
+df_annual_simple <- df_results %>%
+  group_by(year) %>%
+  summarise(
+    cum_return = prod(1 + mean_return) - 1,
+    monthly_return = mean(mean_return, na.rm = TRUE),
+    monthly_risk = sd(mean_return, na.rm = TRUE),
+    sharpe_ratio = (monthly_return * 12) / (monthly_risk * sqrt(12)),
+    annual_risk = monthly_risk * sqrt(12),
+    .groups = "drop"
+  )
+
+df_annual_simple
+```
+
+The Simple Momentum Strategy exhibits strong overall performance with consistently positive cumulative returns in most years. Notably, 2010, 2012, 2013, and 2015 show particularly high annual returns (e.g., +74.97\% in 2013) and excellent risk-adjusted performance, as reflected by Sharpe Ratios well above 1—peaking at over 4 in 2013. However, 2011 stands out as a weak year with slightly negative returns and a negative Sharpe Ratio, suggesting that the strategy may be vulnerable in certain market conditions. Despite this, the strategy demonstrates robust performance across the majority of the period, combining high returns with reasonable levels of risk.
+
+
+\subsection{Residual Momentum}
+
+The Residual Momentum strategy is used as a complementary benchmark to evaluate whether traditional momentum signals are primarily driven by common risk factors or by firm-specific effects. Unlike standard momentum, which is based on raw or adjusted past returns, residual momentum is calculated using the residuals from a factor model, typically after removing the influence of known systematic factors such as market, size, or value. By including residual momentum in the comparison, we can gain deeper insights into the nature of return predictability and whether the observed profits from other strategies stem from firm-specific information or broader market trends.
+
+This section focuses on a residual momentum strategy over the years 2009 to 2015. The process begins by calculating the monthly market return, which is the average return of all stocks for each month: \[
+\text{Market Return}t = \frac{1}{N_t} \sum{i=1}^{N_t} r_{i,t}
+\]
+where \varepsilon_{i,t} are the residuals the part of the stock return not explained by the market return.
+The residual momentum score for each stock i at month t is computed by summing these residuals over the formation period: \[
+\text{Residual Momentum}i = \sum{s=t-11}^{t-1} \varepsilon_{i,s}
+\]
+Stocks are then ranked by their residual momentum, and the top 30 are selected to form the portfolio for the next month t+1.
+Finally, for each portfolio month, the code calculates the average return \bar{r}, risk \sigma (standard deviation of returns), and Sharpe ratio, assuming zero risk-free rate: \[
+\bar{r} = \frac{1}{N} \sum_{i=1}^N r_i
+\]
+\[
+\sigma = \sqrt{ \frac{1}{N-1} \sum_{i=1}^N (r_i - \bar{r})^2 }
+\]
+\[
+\text{Sharpe Ratio} = \frac{\bar{r}}{\sigma}
+\]
+This set of metrics summarizes the portfolio’s risk-adjusted performance over time, allowing evaluation of the residual momentum strategy.
+
+```{r}
+library(broom)
+df_market <- df_integrated %>%
+  mutate(month = as.yearmon(Dates)) %>%
+  group_by(month) %>%
+  summarise(market_return = mean(monthly_return, na.rm = TRUE), .groups = "drop")
+
+df_res_momentum <- df_integrated %>%
+  filter(year(Dates) >= 2009 & year(Dates) <= 2015) %>%
+  mutate(month = as.yearmon(Dates)) %>%
+  left_join(df_market, by = "month") %>%
+  group_by(Ticker, month) %>%
+  summarise(
+    Return = last(monthly_return),
+    market_return = last(market_return),
+    .groups = "drop"
+  )
+
+months <- sort(unique(df_res_momentum$month))
+start_index <- which(months == as.yearmon("2009-12"))
+end_index   <- which(months == as.yearmon("2015-11"))
+
+res_results <- list()
+
+for (i in start_index:end_index) {
+  
+  month_target <- months[i + 1]
+  starting_period <- months[i - 11]
+  ending_period <- months[i - 1]
+  
+  formation_data <- df_res_momentum %>%
+    filter(month >= starting_period & month <= ending_period)
+  
+  res_df <- formation_data %>%
+    group_by(Ticker) %>%
+    do({
+      model <- lm(Return ~ market_return, data = .)
+      augment(model)
+    }) %>%
+    ungroup()
+  
+  res_score <- res_df %>%
+    group_by(Ticker) %>%
+    summarise(residual_momentum = sum(.resid, na.rm = TRUE), .groups = "drop") %>%
+    slice_max(order_by = residual_momentum, n = 30, with_ties = FALSE) %>%
+    mutate(monthly_portfolio = format(month_target, "%b %Y"))
+  
+  res_results[[format(month_target, "%b %Y")]] <- res_score
+}
+
+df_residual_momentum <- bind_rows(res_results)
+
+df_residual_momentum
+
+res_dictionary <- lapply(res_results, function(x) x$Ticker)
+
+df_subset_period <- df_integrated %>%
+  filter(year(Dates) >= 2009 & year(Dates) <= 2015)
+
+mean_res_returns <- list()
+
+for (month in names(res_dictionary)) {
+  monthly_tickers <- res_dictionary[[month]]
+  
+  monthly_data <- df_subset_period %>%
+    filter(format(as.yearmon(Dates), "%b %Y") == month) %>%
+    filter(Ticker %in% monthly_tickers)
+
+  
+  ticker_returns <- monthly_data %>%
+    group_by(Ticker) %>%
+    summarise(return = mean(monthly_return, na.rm = TRUE), .groups = "drop")
+  
+  mean_return <- mean(ticker_returns$return, na.rm = TRUE)
+  risk <- sd(ticker_returns$return, na.rm = TRUE)
+  sharpe_ratio <- ifelse(risk > 0, mean_return / risk, NA)
+  
+  result <- tibble(
+    month = month,
+    mean_return = mean_return,
+    risk = risk,
+    sharpe_ratio = sharpe_ratio
+  )
+  
+  mean_res_returns[[month]] <- result
+}
+
+df_res_results <- bind_rows(mean_res_returns)
+df_res_results
+```
+
+The following code computes annual performance statistics for the Residual momentum strategy. After extracting the year from the monthly date column, the data is aggregated by year. For each year, the script calculates the cumulative return, average monthly return, monthly standard deviation (risk), annualized Sharpe Ratio, and annualized volatility. These metrics provide a comprehensive overview of the strategy’s performance on a yearly basis.
+
+```{r}
+df_res_results_1 <- df_res_results %>%
+  mutate(year = substr(month, 5, 8))  
+
+df_res_annual <- df_res_results_1 %>%
+  group_by(year) %>%
+  summarise(
+    cum_return = prod(1 + mean_return) - 1,
+    monthly_return = mean(mean_return, na.rm = TRUE),
+    monthly_risk = sd(mean_return, na.rm = TRUE),
+    sharpe_ratio = (monthly_return * 12) / (monthly_risk * sqrt(12)),
+    annual_risk = monthly_risk * sqrt(12),
+    .groups = "drop"
+  )
+
+df_res_annual
+```
+
+The residual momentum strategy displays highly volatile and inconsistent performance across the years. While it achieves a strong cumulative return in 2013 (+34.17\%) and a solid Sharpe Ratio (1.40), it also experiences significant losses in 2011 (-38.79\%), 2014, and 2015, accompanied by negative Sharpe Ratios, indicating poor risk-adjusted returns. Overall, the strategy shows some potential in favorable conditions but lacks stability and suffers from considerable downside risk in multiple years.
+
+
+\subsection{Benchmark}
+
+In order to provide a meaningful benchmark for evaluating the performance of the momentum-based strategies analyzed, we incorporate the STOXX Europe 600 Index as a reference point. This index offers a broad and representative view of the European equity market, encompassing large, mid, and small-cap companies across 17 countries. By comparing the strategies to the STOXX 600, we can assess their effectiveness not only in absolute terms, but also relative to a diversified and widely recognized market index. This benchmark allows us to determine whether the strategies deliver superior risk-adjusted returns and justify any additional complexity or turnover they may involve.
+
+The following code computes the monthly performance metrics of the benchmark index for the period between 2010 and 2015. It calculates, for each month, the average return, volatility (standard deviation), and Sharpe ratio, grouping the data by month. The results are organized chronologically and prepared for comparison with the other strategies under analysis.
+
+```{r}
+df_monthly_benchmark<- df_integrated %>%
+  filter(year(Dates) >= 2010 & year(Dates) <= 2015) %>%
+  mutate(month = as.yearmon(Dates)) %>%
+  group_by(month) %>%
+  summarise(
+    mean_return = mean(monthly_return),
+    risk=sd(monthly_return),
+    sharpe_ratio = ifelse(risk > 0, mean_return / risk, NA),
+    .groups = "drop"
+  ) %>%
+  arrange(month)
+df_monthly_benchmark<-df_monthly_benchmark %>%
+  mutate(month=as.character(month))
+df_monthly_benchmark
+```
+
+The following code computes annual performance statistics for the benchmark approach. After extracting the year from the monthly date column, the data is aggregated by year. For each year, the script calculates the cumulative return, average monthly return, monthly standard deviation (risk), annualized Sharpe Ratio, and annualized volatility. These metrics provide a comprehensive overview of the strategy’s performance on a yearly basis.
+
+```{r}
+df_benchmark <- df_monthly_benchmark %>%
+  mutate(month=as.yearmon(month))%>%
+  mutate(year = year(month))%>%
+  group_by(year) %>%
+  summarise(
+    cum_return = prod(1 + mean_return) - 1,
+    monthly_return = mean(mean_return, na.rm = TRUE),
+    monthly_risk = sd(mean_return, na.rm = TRUE),
+    sharpe_ratio = (monthly_return * 12) / (monthly_risk * sqrt(12)),
+    annual_risk = monthly_risk * sqrt(12),
+    .groups = "drop"
+  )
+
+df_benchmark
+```
+
+The benchmark (STOXX 600) shows high variability in performance over the 2010-2015 period. It recorded strong cumulative returns in years like 2010, 2012, and especially 2013, which also featured the highest Sharpe ratio (2.31), indicating good risk-adjusted performance. Conversely, 2011 was a notably poor year, with negative returns and a Sharpe ratio of -1.18, reflecting losses and relatively high volatility. Overall, the benchmark delivered positive returns in most years, but with varying levels of risk and efficiency, highlighting the importance of comparing active strategies against this reference.
+
+\section{Comparison of the results}
+
+To evaluate the effectiveness of the different investment strategies employed, we present a series of summary tables reporting key performance metrics on an annual basis. These metrics include: \begin{itemize}
+\item Cumulative Return, which reflects the overall growth of the portfolio;
+\item Monthly Return, representing the average return earned each month;
+\item Annual Risk, which scales monthly volatility to an annualized measure;
+\item Sharpe Ratio, a risk-adjusted performance indicator;
+\item Drawdown, representing the maximum potential loss during a given period.
+\end{itemize}
+By comparing these indicators across strategies and over time, we can assess not only the returns generated, but also the consistency, volatility, and efficiency of each approach relative to the others and to the benchmark (STOXX 600).
+
+\subsection{Cumulative Return}
+
+This section presents the cumulative annual returns for each strategy, the results are organized by year, allowing for a clear comparison of each strategy’s performance over time.
+
+```{r}
+df_simple_renamed <- df_annual_simple %>%
+  rename(Simple_Momentum = cum_return)
+
+df_skew_renamed <- df_annual_skew %>%
+  rename(Skewness_Momentum = cum_return)
+
+df_res_renamed <- df_res_annual %>%
+  rename(Residual_Momentum = cum_return)
+
+df_bench_renamed <- df_benchmark %>%
+  rename(Benchmark = cum_return) %>%
+  mutate(year=as.character(year))
+
+df_final <- df_simple_renamed %>%
+  select(year, Simple_Momentum) %>%
+  left_join(df_skew_renamed %>% select(year, Skewness_Momentum), by = "year")%>%
+  left_join(df_res_renamed %>% select(year, Residual_Momentum), by = "year")%>%
+  left_join(df_bench_renamed %>% select(year, Benchmark), by = "year")
+
+library(knitr)
+library(kableExtra)
+df_final%>%
+  kable(digits = 3, caption = "ANNUAL CUMULATIVE RETURN") %>%
+  kable_styling(full_width = F)
+```
+
+The Annual Cumulative Return table presents the total yearly growth of each strategy and the benchmark from 2010 to 2015, showing the overall effectiveness in compounding returns over the year.
+
+The Simple Momentum strategy consistently demonstrates the strongest cumulative growth, with notably high returns in 2010 (0.578), 2012 (0.433), 2013 (0.750), and 2015 (0.342). These results highlight its ability to generate substantial gains over time, often more than doubling or even tripling the performance of the benchmark in some years. The only exception is 2011, where it shows a slight negative return (-0.068), indicating some vulnerability in market downturns.
+
+The Skewness Momentum strategy achieves positive but more moderate cumulative returns compared to Simple Momentum. It posts solid growth in 2010 (0.296), 2012 (0.268), and 2013 (0.205), but it suffers a significant decline in 2011 (-0.129). Overall, it provides a balanced growth profile that is less aggressive but more stable.
+
+The Residual Momentum strategy displays the most volatility, with modest positive cumulative returns in 2012 (0.177) and 2013 (0.342), but substantial negative returns in 2011 (-0.388), 2014 (-0.145), and 2015 (-0.267). This indicates that the strategy can deliver high rewards but also comes with higher risks and inconsistent annual performance.
+
+The Benchmark shows steady but lower cumulative returns relative to the momentum strategies. It achieves positive growth in 2010 (0.198), 2012 (0.226), 2013 (0.261), and 2015 (0.112), but also experiences losses in 2011 (-0.184) and moderate gains in other years, reflecting typical market index behavior.
+
+In summary, the Simple Momentum strategy leads in annual cumulative returns, showcasing strong compounding potential across most years. The Skewness Momentum strategy offers moderate, steadier gains, while the Residual Momentum strategy is more variable, with higher risk and less predictable returns. The Benchmark provides a reliable but less lucrative baseline, consistent with its role as a market reference.
+
+\textbf{Cumulative Returns over times}
+
+```{r}
+df_plot <- bind_rows(
+  df_results_tot %>% select(month, cum_return) %>% mutate(strategy = "Simple Momentum"),
+  df_results_skew_tot %>% select(month, cum_return) %>% mutate(strategy = "Skewness Momentum"),
+  df_res_results_tot %>% mutate(month=as.character(month)) %>%select(month, cum_return) %>% mutate(strategy = "Residual Momentum"),
+  df_results_bench_tot %>% select(month, cum_return) %>% mutate(strategy = "Benchmark")
+)
+
+ggplot(df_plot, aes(x = as.yearmon(month, format = "%b %Y"), y = cum_return, color = strategy)) +
+  geom_line(size = 1) +
+  labs(title = "CUMULATIVE RETURNS OVER TIMES",
+       x = "Data",
+       y = "Cumulative Return",
+       color = "Strategy") +
+  theme_minimal()
+```
+
+This chart provides a comprehensive view of the overall performance of each strategy from 2010 to 2015. It highlights the compounding effect of monthly returns and reveals long-term growth patterns.
+
+The Simple Momentum strategy clearly outperforms all others, achieving a cumulative return above 5 by the end of 2015. Especially from 2013 onward, it exhibits both high average returns and consistent positive performance.
+
+The Skewness Momentum and Benchmark strategies follow relatively similar paths, ultimately reaching cumulative returns of around 2. This suggests that skewness-based selection performs comparably to the market index in terms of total growth, although it may still offer better risk-adjusted returns.
+
+The Residual Momentum strategy significantly underperforms. It ends the period with a cumulative return close to or even below its initial level, showing no ability to generate sustainable long-term growth. This result confirms the instability and high volatility already highlighted in previous analyses, making it the least attractive strategy from a cumulative performance perspective.
+
+\textbf{Barplot with annual cumulative returns}
+
+```{r}
+df_plot_final<-bind_rows(
+  df_results_tot %>%
+  mutate(month_date = as.yearmon(month, "%b %Y"),
+         year = year(month_date)) %>%
+  group_by(year) %>%
+  summarise(annual_cum_return = prod(1 + mean_return) - 1,
+            .groups = "drop") 
+  %>% mutate(strategy = "Simple Momentum"),
+  df_results_skew_tot %>%
+  mutate(month_date = as.yearmon(month, "%b %Y"),
+         year = year(month_date)) %>%
+  group_by(year) %>%
+  summarise(annual_cum_return = prod(1 + mean_return) - 1,
+            .groups = "drop") %>% 
+    mutate(strategy = "Skewness Momentum"),
+  df_res_results_tot %>%
+  mutate(month_date = as.yearmon(month, "%b %Y"),
+         year = year(month_date)) %>%
+  group_by(year) %>%
+  summarise(annual_cum_return = prod(1 + mean_return) - 1,
+            .groups = "drop") %>%
+    mutate(strategy = "Residual Momentum"),
+  df_results_bench_tot %>%
+  mutate(month_date = as.yearmon(month, "%b %Y"),
+         year = year(month_date)) %>%
+  group_by(year) %>%
+  summarise(annual_cum_return = prod(1 + mean_return) - 1,
+            .groups = "drop") %>% 
+    mutate(strategy = "Benchmark"))
+
+ggplot(df_plot_final, aes(x = as.factor(year), y = annual_cum_return * 100, fill = strategy)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.7), width = 0.6) +
+  
+  labs(title = "BARPLOT WITH ANNUAL CUMULATIVE RETURNS",
+       x = "Year", y = "Cumulative return (%)", fill = "Strategy") +
+  
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", color = "#333333"),
+    plot.subtitle = element_text(size = 12, color = "#666666"),
+    axis.title = element_text(size = 11, face = "bold"),
+    axis.text = element_text(size = 10),
+    legend.position = "top",
+    legend.justification = "center",
+    legend.text = element_text(size = 10),
+    panel.grid.major.y = element_line(color = "#E0E0E0"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    plot.margin = margin(10, 10, 10, 10)
+  ) +
+  
+  ylim(min(df_plot_final$annual_cum_return) * 105,
+       max(df_plot_final$annual_cum_return) * 115)
+
+```
+
+Among the strategies, Simple Momentum is the most consistently successful, delivering strong returns especially in 2010, 2012, 2013, and 2015, capturing persistent market trends effectively. Residual Momentum shows high volatility and underperformance, with significant losses in 2011 and 2015, raising concerns about its reliability. Skewness Momentum performs moderately well, more stable than Residual Momentum, with mostly positive or neutral returns. The Benchmark is more stable but generally yields lower returns, especially during strong momentum years like 2013. Overall, Simple Momentum stands out for its superior returns and consistency, while Skewness Momentum and the Benchmark offer more conservative, lower-risk profiles, and Residual Momentum carries higher risk and instability.
+
+\subsection{Monthly return}
+
+This part presents the average monthly returns for each strategy, in a year by year basis, offering an overview of how each approach performed on a monthly basis throughout the observed period.
+
+```{r}
+df_simple_renamed <- df_annual_simple %>%
+  rename(Simple_Momentum = monthly_return)
+
+df_skew_renamed <- df_annual_skew %>%
+  rename(Skewness_Momentum = monthly_return)
+
+df_res_renamed <- df_res_annual %>%
+  rename(Residual_Momentum = monthly_return)
+
+df_bench_renamed <- df_benchmark %>%
+  rename(Benchmark = monthly_return) %>%
+  mutate(year=as.character(year))
+
+df_final <- df_simple_renamed %>%
+  select(year, Simple_Momentum) %>%
+  left_join(df_skew_renamed %>% select(year, Skewness_Momentum), by = "year")%>%
+  left_join(df_res_renamed %>% select(year, Residual_Momentum), by = "year")%>%
+  left_join(df_bench_renamed %>% select(year, Benchmark), by = "year")
+
+df_final%>%
+  kable(digits = 3, caption = "MEAN RETURN PER MONTH") %>%
+  kable_styling(full_width = F)
+```
+
+The Mean Return per Month table highlights the average monthly returns for each strategy and the benchmark from 2010 to 2015. These figures provide insight into the typical monthly performance investors might expect, illustrating both positive and negative return periods.
+
+The Simple Momentum strategy consistently delivers the highest average monthly returns across most years, with particularly strong results in 2010 (0.040), 2012 (0.031), and 2013 (0.048). This demonstrates its effectiveness in generating positive returns, even outperforming the benchmark substantially during these years. However, it shows a slight negative mean return in 2011 (-0.003), indicating a minor setback in that year.
+
+The Skewness Momentum strategy produces moderate monthly returns, generally positive but lower than Simple Momentum. Its best years include 2010 (0.023) and 2012 (0.020), while it dips into negative territory in 2011 (-0.011). Overall, it offers a more conservative return profile, which aligns with its generally lower risk observed earlier.
+
+The Residual Momentum strategy exhibits a more volatile return pattern, with modest positive returns in years like 2013 (0.027) and 2012 (0.018), but also pronounced negative returns in 2011 (-0.038), 2014 (-0.012), and 2015 (-0.022). These fluctuations reflect its higher risk and less consistent performance.
+
+The Benchmark shows relatively stable but lower monthly returns compared to the momentum strategies, peaking in 2013 (0.020) and 2012 (0.018), while also experiencing negative returns in 2011 (-0.016). Its steady yet modest performance makes it a useful baseline for comparison but less attractive for those seeking higher returns.
+
+In summary, the Simple Momentum strategy outperforms on average monthly returns, offering the best growth potential. Skewness Momentum provides moderate but steadier returns, whereas Residual Momentum’s returns are more erratic and generally weaker. The Benchmark delivers stable but lower monthly gains, consistent with its role as a reference index.
+
+\textbf{Monthly return distribution}
+
+```{r}
+df_violin <- bind_rows(
+  df_results_tot %>% mutate(strategy = "Simple Momentum"),
+  df_results_skew_tot %>% mutate(strategy = "Skewness Momentum"),
+  df_res_results_tot %>% mutate(strategy = "Residual Momentum"),
+  df_results_bench_tot %>% mutate(strategy = "Benchmark")
+)
+
+ggplot(df_violin, aes(x = strategy, y = mean_return, fill = strategy)) +
+  geom_violin(trim = FALSE) +
+  geom_boxplot(width = 0.1, fill = "white") +
+  labs(title = "MONTHLY RETURN DISTRIBUTION",
+     y = "Monthly return") +
+  theme_minimal()
+```
+
+The violin plot combines the characteristics of a boxplot and a kernel density plot to illustrate the distribution of monthly returns for each strategy. The width of each violin reflects the density of returns: wider sections indicate more common return values, while narrower parts represent less frequent outcomes.
+From the chart, we observe that both the Skewness Momentum and the Benchmark strategies exhibit similar behavior, with more concentrated return distributions, a slightly positive median, and a relatively symmetric shape.
+The Simple Momentum strategy shows a wider spread and a positively skewed distribution. It has a higher median and a pronounced upper tail, indicating frequent positive outliers and greater upside potential.
+The Residual Momentum strategy displays the broadest and most dispersed distribution, with substantial mass in both tails. This suggests higher volatility and the presence of both extreme gains and losses.
+
+\subsection{Annual Risk}
+
+This section reports the annual risk levels measured as the standard deviation of monthly returns scaled to a yearly horizon for each strategy, allowing for a comparative assessment of volatility across different approaches.
+
+```{r}
+df_simple_renamed <- df_annual_simple %>%
+  rename(Simple_Momentum = annual_risk)
+
+df_skew_renamed <- df_annual_skew %>%
+  rename(Skewness_Momentum = annual_risk)
+
+df_res_renamed <- df_res_annual %>%
+  rename(Residual_Momentum = annual_risk)
+
+df_bench_renamed <- df_benchmark %>%
+  rename(Benchmark = annual_risk) %>%
+  mutate(year=as.character(year))
+
+df_final <- df_simple_renamed %>%
+  select(year, Simple_Momentum) %>%
+  left_join(df_skew_renamed %>% select(year, Skewness_Momentum), by = "year")%>%
+  left_join(df_res_renamed %>% select(year, Residual_Momentum), by = "year")%>%
+  left_join(df_bench_renamed %>% select(year, Benchmark), by = "year")
+
+df_final%>%
+  kable(digits = 3, caption = "ANNUAL RISK") %>%
+  kable_styling(full_width = F)
+```
+
+The table on Annual Risk presents the standard deviation of returns on an annualized basis, offering a direct measure of each strategy’s volatility over the 2010–2015 period. A higher annual risk indicates greater variability in returns, which investors may associate with greater uncertainty or potential losses.
+
+The Residual Momentum strategy clearly exhibits the highest and most volatile risk profile, particularly in 2012 (0.328) and 2015 (0.305), making it the riskiest among the four strategies. This elevated volatility, coupled with its relatively low or negative Sharpe Ratios (as discussed earlier), signals poor risk-adjusted performance.
+
+The Simple Momentum strategy shows moderate and consistent risk, with values ranging from 0.097 in 2012 (its best-performing year) to a maximum of 0.272 in 2011. Despite this variability, the strategy compensates well for the risk taken, as highlighted by its strong Sharpe Ratios in most years.
+
+The Skewness Momentum strategy maintains a relatively low and stable risk profile, particularly in 2014 (0.086) and 2011 (0.144), which makes it appealing from a volatility perspective. However, this lower risk must be weighed against its generally weaker return performance and inconsistent Sharpe Ratios.
+
+Lastly, the Benchmark (STOXX 600) displays the lowest and most stable risk levels overall. Its annual risk remains tightly clustered between 0.084 and 0.178, suggesting that the index offers a solid baseline in terms of volatility control. However, the lower risk comes with moderate returns, making it less attractive than the Simple Momentum strategy in terms of performance but more reliable than Residual Momentum in terms of stability.
+
+In summary, while Simple Momentum balances risk and reward most effectively, the Benchmark offers the most stable risk exposure, and Residual Momentum stands out for its elevated and potentially excessive volatility.
+
+\subsection{Sharpe Ratio}
+
+This section reports the Sharpe ratio for each strategy on a yearly basis, providing an indication of how effectively each strategy converted risk into return offering a comparative view of their performance efficiency over time.
+
+```{r}
+df_simple_renamed <- df_annual_simple %>%
+  rename(Simple_Momentum = sharpe_ratio)
+
+df_skew_renamed <- df_annual_skew %>%
+  rename(Skewness_Momentum = sharpe_ratio)
+
+df_res_renamed <- df_res_annual %>%
+  rename(Residual_Momentum = sharpe_ratio)
+
+df_bench_renamed <- df_benchmark %>%
+  rename(Benchmark = sharpe_ratio) %>%
+  mutate(year=as.character(year))
+
+df_final <- df_simple_renamed %>%
+  select(year, Simple_Momentum) %>%
+  left_join(df_skew_renamed %>% select(year, Skewness_Momentum), by = "year")%>%
+  left_join(df_res_renamed %>% select(year, Residual_Momentum), by = "year")%>%
+  left_join(df_bench_renamed %>% select(year, Benchmark), by = "year")
+
+df_final%>%
+  kable(digits = 3, caption = "SHARPE RATIO") %>%
+  kable_styling(full_width = F)
+```
+
+The Sharpe Ratio table offers a clear view of the risk-adjusted performance of the different strategies compared to the benchmark (STOXX 600) over the 2010–2015 period. The Simple Momentum strategy consistently outperforms the others, achieving notably high Sharpe Ratios in 2012 (3.808) and 2013 (4.026), which indicate excellent compensation for the level of risk taken. Even in less favorable years, such as 2014 and 2015, it maintains positive Sharpe values (0.436 and 1.633 respectively), suggesting that the returns remain attractive relative to their volatility.
+
+The Skewness Momentum strategy shows more variability. It performs relatively well in 2010 (1.539) and 2012 (2.457), indicating that skewness-based signals can capture some profitable opportunities. However, in years like 2011 and 2015, its Sharpe Ratios drop significantly (-0.885 and 0.609), highlighting a lack of robustness under changing market conditions.
+
+In contrast, the Residual Momentum strategy displays the weakest performance overall, with negative Sharpe Ratios in four out of six years. Particularly concerning are 2011 and 2015, where the values fall to -2.018 and -0.865, suggesting that the returns generated are not sufficient to justify the risk exposure, and in fact, the strategy may be systematically underperforming during market stress.
+
+The Benchmark, represented by the STOXX 600 index, provides a middle ground. While it doesn’t reach the peaks of the Simple Momentum strategy, it maintains positive Sharpe Ratios in most years—especially in 2013 (2.313)—demonstrating stable and moderate risk-adjusted returns.
+
+Overall, the Sharpe Ratio comparison indicates that the Simple Momentum strategy is the most efficient in generating excess returns per unit of risk, while the Residual Momentum strategy appears less reliable, especially in turbulent market conditions.
+
+\textbf{Sharpe Ratio Plot}
+
+```{r}
+df_sharpe <- bind_rows(df_annual_simple %>% mutate(strategy = "Simple Momentum"),
+  df_annual_skew %>% mutate(strategy = "Skewness Momentum"),
+  df_res_annual %>% mutate(strategy = "Residual Momentum"),
+  df_benchmark %>% mutate(year=as.character(year), strategy = "Benchmark"))
+
+ggplot(df_sharpe, aes(x = year, y = sharpe_ratio, fill = strategy)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(title = "ANNUAL SHARPE RATIO",
+       x = "Year", y = "Sharpe Ratio", fill = "Strategy") +
+  theme_minimal()
+```
+The Sharpe Ratio is a key measure of risk-adjusted return. It evaluates how much excess return an investment generates for each unit of risk taken. In essence, a higher Sharpe Ratio indicates better performance relative to the risk incurred: it means the strategy achieves a higher return with lower volatility.
+From the chart, we observe that the Simple Momentum strategy achieves the highest Sharpe Ratios across most years, indicating consistently strong returns relative to its volatility. Both the Skewness Momentum and the Benchmark strategies exhibit similar behavior over time, with positive Sharpe Ratios in most years, though typically lower than that of Simple Momentum.
+The Residual Momentum strategy displays the weakest performance overall. It records negative Sharpe Ratios in 2011, 2014, and 2015, indicating poor compensation for the risk taken during those years. Even in its best years (2012 and 2013), it underperforms the other strategies when returns are adjusted for risk.
+
+\subsection{Drawdown}
+
+```{r}
+df_results_tot <- df_results %>%
+  mutate(month=as.yearmon(month)) %>%
+  arrange(month) %>%
+  mutate(cum_return = cumprod(1 + mean_return)) %>%
+  mutate(month=as.character(month))
+
+df_results_skew_tot <- df_results_skew %>%
+  mutate(month=as.yearmon(month)) %>%
+  arrange(month) %>%
+  mutate(cum_return = cumprod(1 + mean_return))%>%
+  mutate(month=as.character(month))
+
+df_res_results_tot <- df_res_results %>%
+  mutate(month=as.yearmon(month))%>%
+  arrange(month) %>%
+  mutate(cum_return = cumprod(1 + mean_return))%>%
+  mutate(month=as.character(month))
+
+df_results_bench_tot <- df_monthly_benchmark %>%
+  mutate(month=as.yearmon(month)) %>%
+  arrange(month) %>%
+  mutate(cum_return = cumprod(1 + mean_return))%>%
+  mutate(month=as.character(month))
+
+drawdown_formula <- function(df, strategy) {
+  df %>%
+    mutate(month=as.yearmon(month, "%b %Y")) %>%
+    arrange(month) %>%
+    mutate(
+      cum_return = cumprod(1 + mean_return),
+      max_cum = cummax(cum_return),
+      drawdown = cum_return / max_cum - 1,
+      strategy = strategy
+    ) %>%
+    select(month, strategy, drawdown) %>%
+    filter(!is.na(drawdown), is.finite(drawdown))
+}
+
+drawdown_tot <- bind_rows(
+  drawdown_formula(df_results_tot, "Simple Momentum"),
+  drawdown_formula(df_results_skew_tot, "Skewness Momentum"),
+  drawdown_formula(df_res_results_tot, "Residual Momentum"),
+  drawdown_formula(df_results_bench_tot, "Benchmark")
+)
+
+library(scales)
+library(ggplot2)
+drawdown_tot$month <- as.yearmon(drawdown_tot$month, "%b %Y")
+ggplot(drawdown_tot, aes(x = month, y = drawdown, color = strategy)) +
+  geom_line(size = 1) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", linewidth = 0.5) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  scale_x_yearmon(format = "%b %Y", n = 8) +
+  labs(title = "DRAWDOWN",
+       x = "Data",
+       y = "Drawdown",
+       color = "Strategy") +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "right",
+        axis.text.x = element_text(angle = 45, hjust = 1))
+```
+This chart illustrates, over the 2010–2015 period, the decline from peak cumulative returns for each strategy. It provides a clear representation not only of downside risk but also of the recovery behavior of the portfolios.
+The drawdown has been calculated using the following formula:
+$\text{Drawdown}_t = \frac{R_t}{\max(R_1, R_2, \dots, R_t)} - 1$
+Looking at the graph, we first observe that the Residual Momentum strategy exhibits the deepest drawdowns, reaching losses of over 40% from peak values. After a short recovery in 2013, the strategy experiences an even more severe drawdown, indicating a high level of volatility — a feature we had already observed in previous analyses.
+The other three strategies show relatively similar behavior over the years. Notably, they all experience a drawdown around the end of 2011, followed by a strong and fairly rapid recovery. This suggests a more robust and resilient performance compared to the residual strategy, with better capacity to regain value after periods of loss.
+
+
+\section{Conclusion}
+
+The comparative analysis of the four investment strategies — Simple Momentum, Skewness Momentum, Residual Momentum, and the Benchmark — reveals distinct risk-return profiles. Meaningful insights emerge from evaluating cumulative returns, mean monthly returns, annual volatility, Sharpe ratios, and drawdown behavior.
+
+Among these strategies, the Skewness Momentum strategy stands out for its balanced and consistent performance. It delivers respectable cumulative returns while maintaining relatively low annual risk compared to the other momentum-based approaches, particularly Residual Momentum. This lower volatility is reflected in more moderate drawdowns and a Sharpe ratio that, while lower than that of Simple Momentum, still indicates favorable risk-adjusted returns. Skewness Momentum’s ability to limit risk while generating solid returns makes it a compelling option for investors seeking exposure to momentum effects without excessive volatility.
+
+Despite this, the Simple Momentum strategy remains the top performer overall. It delivers the highest cumulative and average monthly returns across most years, along with the strongest Sharpe ratios, reflecting superior risk-adjusted profitability. Its moderate annual volatility, combined with resilience to drawdowns and swift recoveries during market stress, confirms its effectiveness. Simple Momentum efficiently captures return persistence and translates it into consistent long-term gains.
+
+In contrast, the Residual Momentum strategy demonstrates more erratic behavior. While it occasionally produces strong returns (notably in 2013), it is hampered by deep drawdowns, elevated risk, and negative Sharpe ratios in several years. These features point to significant instability, making it less reliable as a standalone strategy. The depth and frequency of drawdowns suggest that this approach carries substantial risk, often without adequate compensation, requiring careful monitoring and risk management if employed.
+
+Finally, the Benchmark, representing the STOXX 600 index, serves as a useful baseline reflecting broad market performance. It typically yields lower cumulative returns and Sharpe ratios than the momentum strategies, but also exhibits the lowest volatility and shallower drawdowns. Its stability makes it a less profitable but safer choice for risk-averse investors and a valuable reference for assessing the added value of active momentum strategies.
+
+In summary, while the Simple Momentum strategy offers the strongest overall risk-return profile, the Skewness Momentum strategy provides an attractive compromise — combining consistent returns with lower volatility and reasonable risk-adjusted performance. The Residual Momentum strategy is less appealing due to its higher risk and inconsistency, while the Benchmark remains a stable but lower-yielding alternative. These findings highlight the importance of aligning return objectives with risk tolerance when selecting momentum-based investment strategies.
+
+
+
+
+
+
+
+
+
