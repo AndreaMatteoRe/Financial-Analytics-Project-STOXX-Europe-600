@@ -30,7 +30,7 @@ library(kableExtra)
 1. Clone the repository
 
 ```bash
-git clone [TO FILL: repo-link]
+git clone https://github.com/AndreaMatteoRe/Financial-Analytics-Project-STOXX-Europe-600
 ```
 
 2. Place the dataset in:
@@ -44,8 +44,6 @@ git clone [TO FILL: repo-link]
 ```r
 Financial-Market-Analytics.Rmd
 ```
-
----
 
 ## 📌 Notes
 
