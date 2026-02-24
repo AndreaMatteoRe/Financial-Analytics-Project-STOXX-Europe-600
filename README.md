@@ -2,16 +2,10 @@
 
 ## 📁 Files
 
-```
-[TO FILL: tree structure]
-```
-
 **Main components**
 
-* `data/` → input datasets (not included)
-* `src/` → R scripts for data processing and strategies
-* `results/` → output tables and plots
-* `main.R` (or `.Rmd`) → main execution file
+* `Stoxx-600 Originale`→ dataset  
+* `Financial-Market-Analytics.Rmd`→ main execution file
 
 ---
 
@@ -42,27 +36,21 @@ git clone [TO FILL: repo-link]
 2. Place the dataset in:
 
 ```
-[TO FILL: path/to/Stoxx 600 Originale.xlsm]
+"C:\Users\andre\OneDrive\Desktop\Stoxx-600 Originale.xlsm"
 ```
 
 3. Run the main script
 
 ```r
-[TO FILL: main file name]
+Financial-Market-Analytics.Rmd
 ```
 
 ---
 
 ## 📌 Notes
 
-* Dataset is not included in the repository
 * Period analyzed: 2010–2015
 * Benchmark: STOXX Europe 600
 
 ---
 
-## 📜 License
-
-```
-[TO FILL]
-```
