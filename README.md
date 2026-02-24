@@ -36,7 +36,7 @@ git clone https://github.com/AndreaMatteoRe/Financial-Analytics-Project-STOXX-Eu
 2. Place the dataset in:
 
 ```
-"C:\Users\andre\OneDrive\Desktop\Stoxx-600 Originale.xlsm"
+\Stoxx-600 Originale.xlsm"
 ```
 
 3. Run the main script
