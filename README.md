@@ -37,8 +37,8 @@ git clone https://github.com/AndreaMatteoRe/Financial-Analytics-Project-STOXX-Eu
 
 ```
 \Stoxx-600 Originale.xlsm"
-🔗 Or download directly: [Stoxx-600 Originale.xlsm](https://mega.nz/file/7toVzKaA#MP_OYgml0-Szk4HcwmUtTZGVNmA9z6BRMhczqpKzHlk) 
 ```
+> 🔗 Or download directly: [Stoxx-600 Originale.xlsm](https://mega.nz/file/7toVzKaA#MP_OYgml0-Szk4HcwmUtTZGVNmA9z6BRMhczqpKzHlk)
 
 3. Run the main script
 
